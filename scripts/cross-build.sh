@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Cross-build llm-visuals for macOS, Windows and Linux on x86-64 and ARM64,
+# Cross-build autod-visuals for macOS, Windows and Linux on x86-64 and ARM64,
 # from any one of those hosts.
 #
 #   ./scripts/cross-build.sh              # every target this host can link
@@ -99,12 +99,12 @@ for name in "${want[@]}"; do
   out_dir="target/$triple/$PROFILE"
   [ "$PROFILE" = dev ] && out_dir="target/$triple/debug"
 
-  stem="llm-visuals-$VERSION-$name"
+  stem="autod-visuals-$VERSION-$name"
   if [[ "$triple" == *windows* ]]; then
-    (cd "$out_dir" && zip -q "$DIST/$stem.zip" llm-visuals.exe)
+    (cd "$out_dir" && zip -q "$DIST/$stem.zip" autod-visuals.exe)
     built+=("dist/$stem.zip")
   else
-    tar -C "$out_dir" -czf "$DIST/$stem.tar.gz" llm-visuals
+    tar -C "$out_dir" -czf "$DIST/$stem.tar.gz" autod-visuals
     built+=("dist/$stem.tar.gz")
   fi
 done

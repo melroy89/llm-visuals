@@ -6,10 +6,11 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 
+use crate::autod::{AutodState, CycleLane, Objective};
 use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
@@ -66,6 +67,7 @@ pub struct Dashboard<'a> {
     pub experts: Option<&'a ExpertStats>,
     /// The settings screen, drawn over the view while it is open.
     pub settings: Option<&'a SettingsForm>,
+    pub autod: &'a AutodState,
 }
 
 pub struct Renderer {
@@ -149,6 +151,8 @@ impl Renderer {
         match d.view {
             ViewMode::Models => self.render_compare(frame, rows[2], d),
             ViewMode::Bandwidth => self.render_bandwidth(frame, rows[2], d),
+            ViewMode::AutodOverview => self.render_autod_overview(frame, rows[2], d),
+            ViewMode::AutodDetails => self.render_autod_details(frame, rows[2], d.autod),
             _ => self.render_panels(frame, rows[2], d),
         }
         self.render_footer(frame, rows[3], d);
@@ -166,14 +170,238 @@ impl Renderer {
         }
     }
 
+    fn render_autod_overview(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        let autod = d.autod;
+        if !autod.available {
+            self.render_autod_unavailable(frame, area, autod);
+            return;
+        }
+        let cycle_rows = if area.width >= 150 {
+            1
+        } else if area.width >= 100 {
+            2
+        } else {
+            3
+        };
+        let branch_rows = if area.width < 100 { 2 } else { 1 };
+        let cycle_h = cycle_rows + branch_rows + 2 + autod.cycle.active_lanes.len().min(2) as u16;
+        let has_work = autod.active_objective.is_some() || !autod.cycle.active_lanes.is_empty();
+        let work_h = if has_work && area.height >= 28 { 7 } else { 5 };
+        let rows = Layout::vertical([
+            Constraint::Length(4),
+            Constraint::Length(cycle_h),
+            Constraint::Length(work_h),
+            Constraint::Min(3),
+        ])
+        .split(area);
+        let waiting = autod.frontier.get("waiting").copied().unwrap_or(0);
+        let candidate = autod.frontier.get("candidate").copied().unwrap_or(0);
+        let failed = autod.frontier.get("failed").copied().unwrap_or(0);
+        self.render_autod_status(frame, rows[0], autod);
+        self.render_autonomous_cycle(frame, rows[1], autod);
+        let cols = if rows[2].width >= 100 {
+            Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
+                .split(rows[2])
+        } else {
+            Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+                .split(rows[2])
+        };
+        let objective = autod
+            .active_objective
+            .as_ref()
+            .or_else(|| autod.objectives.first());
+        let mut work_lines = objective.map(objective_lines).unwrap_or_else(|| {
+            vec![
+                Line::styled(
+                    " No active objective · awaiting the next discovery cycle",
+                    Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ),
+                Line::styled(
+                    if candidate == 0 && waiting == 0 {
+                        if cols[0].width < 60 {
+                            " Frontier empty · remaining idle by design"
+                        } else {
+                            " Frontier is empty; AUTOD remains available without inventing busywork"
+                        }
+                    } else {
+                        " Eligible work will resume under the configured scheduler"
+                    },
+                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                ),
+            ]
+        });
+        if let Some(lane) = primary_cycle_lane(autod) {
+            let inference_tps: f64 = d.models.iter().map(|m| f64::from(m.perf.decode_tps)).sum();
+            let gpu = d
+                .gpus
+                .iter()
+                .map(|g| g.utilization_gpu as f64)
+                .fold(0.0, f64::max);
+            let mut runtime = format!(
+                " runtime  {} · {}",
+                lane.role,
+                fmt_cycle_elapsed(&lane.started_at)
+            );
+            if inference_tps > 0.0 {
+                runtime.push_str(&format!(" · {:.1} tok/s", inference_tps));
+            }
+            runtime.push_str(&format!(
+                " · {} out · {} cached",
+                fmt_int(autod.counters.output_tokens as usize),
+                fmt_int(autod.counters.cached_tokens as usize)
+            ));
+            if gpu > 0.0 {
+                runtime.push_str(&format!(" · host GPU {:.0}%", gpu));
+            }
+            work_lines.push(Line::styled(
+                runtime,
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(work_lines)
+                .wrap(Wrap { trim: true })
+                .block(panel(
+                    if has_work {
+                        " ACTIVE WORK "
+                    } else {
+                        " IDLE / NEXT "
+                    },
+                    if has_work { pal::VIOLET } else { pal::TEXT_DIM },
+                )),
+            cols[0],
+        );
+        let outcome = &autod.recent_outcomes;
+        let summary = vec![
+            Line::raw(format!(
+                " LAST 15M  ✓ {}  ↷ {}  × {}",
+                outcome.succeeded, outcome.deferred, outcome.failed
+            )),
+            Line::styled(
+                format!(" FAILURE HISTORY  {failed} retained"),
+                Style::default().fg(pal::c(if failed > 0 {
+                    pal::MAGENTA
+                } else {
+                    pal::TEXT_DIM
+                })),
+            ),
+        ];
+        frame.render_widget(
+            Paragraph::new(summary).block(panel(" AUTOD OPERATIONS ", pal::TEXT_DIM)),
+            cols[1],
+        );
+        if rows[3].height > 2 {
+            let lines: Vec<Line> = autod
+                .activities
+                .iter()
+                .filter(|activity| !(activity.kind == "phase" && activity.status == "entered"))
+                .take(rows[3].height.saturating_sub(2) as usize)
+                .map(activity_line)
+                .collect();
+            frame.render_widget(
+                Paragraph::new(lines).block(panel(" RECENT ACTIVITY ", pal::TEXT_DIM)),
+                rows[3],
+            );
+        }
+    }
+
+    fn render_autod_unavailable(&self, frame: &mut Frame, area: Rect, autod: &AutodState) {
+        let message = autod
+            .error
+            .as_deref()
+            .unwrap_or("AUTOD telemetry unavailable");
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    " AUTOD telemetry unavailable",
+                    Style::default()
+                        .fg(pal::c(pal::MAGENTA))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::raw(""),
+                Line::raw(format!(" {message}")),
+                Line::styled(
+                    format!(
+                        " Retrying {} with backoff; LLM and GPU monitoring are unaffected.",
+                        autod.socket.display()
+                    ),
+                    Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ),
+            ])
+            .block(panel(" AUTOD ", pal::MAGENTA)),
+            area,
+        );
+    }
+
+    fn render_autod_details(&self, frame: &mut Frame, area: Rect, autod: &AutodState) {
+        if !autod.available {
+            self.render_autod_unavailable(frame, area, autod);
+            return;
+        }
+        let panes = autod_detail_panes(area);
+        let visible = autod.visible_activities();
+        let mut lines = vec![Line::styled(
+            format!(" Filter: {}   f cycles", autod.filter.as_str()),
+            Style::default().fg(pal::c(pal::TEXT_MUTED)),
+        )];
+        let activity_rows = panes[0].height.saturating_sub(3) as usize;
+        let selected_index = autod.selected_index();
+        let selected = selected_index.unwrap_or(0);
+        let window_start = activity_window_start(selected, visible.len(), activity_rows);
+        for (i, a) in visible
+            .iter()
+            .enumerate()
+            .skip(window_start)
+            .take(activity_rows)
+        {
+            let prefix = if Some(i) == selected_index {
+                "▶"
+            } else {
+                " "
+            };
+            let mut line = activity_line(a);
+            line.spans.insert(
+                0,
+                Span::styled(prefix, Style::default().fg(pal::c(pal::VIOLET))),
+            );
+            lines.push(line)
+        }
+        let activity_state = if autod.follow_latest {
+            "LIVE"
+        } else if selected_index.is_some() {
+            "PINNED"
+        } else {
+            "PINNED · not in live list"
+        };
+        frame.render_widget(
+            Paragraph::new(lines).block(panel(
+                &format!(" ACTIVITY {activity_state}  ↑/↓ j/k "),
+                pal::CYAN,
+            )),
+            panes[0],
+        );
+        let body = autod_detail_body(autod);
+        let scroll = autod
+            .detail_scroll
+            .min(detail_scroll_max_for_body(&body, panes[1]));
+        frame.render_widget(
+            Paragraph::new(body)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0))
+                .block(panel(" RECORD  PgUp/PgDn Home/End ", pal::VIOLET)),
+            panes[1],
+        );
+    }
+
     /// The dashboard proper: everything below the header, for the focused model.
     fn render_panels(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
-        let n_gpus = d.gpus.len();
+        if d.view == ViewMode::All {
+            self.render_all(frame, area, d);
+            return;
+        }
         let h = area.height;
-        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9);
         let show_requests = h >= 22;
         let show_ctx = h >= 16;
-        let req_h = if show_requests { 7 } else { 0 };
         let ctx_h = if !show_ctx {
             0
         } else if d.view == ViewMode::Perf {
@@ -183,19 +411,19 @@ impl Renderer {
         };
 
         let constraints: Vec<Constraint> = match d.view {
-            ViewMode::All => vec![
-                Constraint::Length(gpu_rows),
-                Constraint::Length(ctx_h),
-                Constraint::Min(8),
-                Constraint::Length(req_h),
-            ],
             ViewMode::Perf => vec![
                 Constraint::Min(12),
                 Constraint::Length(ctx_h),
                 Constraint::Length(0),
                 Constraint::Length(if show_requests { 12 } else { 0 }),
             ],
-            ViewMode::Heatmap | ViewMode::MoE | ViewMode::Bandwidth | ViewMode::Models => vec![
+            ViewMode::All
+            | ViewMode::Heatmap
+            | ViewMode::MoE
+            | ViewMode::Bandwidth
+            | ViewMode::Models
+            | ViewMode::AutodOverview
+            | ViewMode::AutodDetails => vec![
                 Constraint::Length(0),
                 Constraint::Length(ctx_h),
                 Constraint::Min(8),
@@ -240,6 +468,236 @@ impl Renderer {
         if rows[3].height > 0 {
             self.render_requests(frame, rows[3], d);
         }
+    }
+
+    /// The default workspace keeps model and host telemetry intact while
+    /// treating AUTOD's control loop as a first-class operational signal.
+    fn render_all(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        let gpu_rows = (3 * d.gpus.len().max(1) as u16 + 2).max(9);
+        let show_summary = area.height >= 16;
+        let summary_h = if show_summary { 4 } else { 0 };
+        let show_experts = d.fade.n_experts > 1 || !d.attention.is_empty();
+        let workspace_h = area
+            .height
+            .saturating_sub(gpu_rows)
+            .saturating_sub(summary_h);
+        let request_rows = usize::from(d.perf.current.is_some()) + d.perf.history.len();
+        let request_h = all_request_panel_height(workspace_h, request_rows);
+        let rows = Layout::vertical([
+            Constraint::Length(gpu_rows),
+            Constraint::Length(summary_h),
+            Constraint::Min(8),
+            Constraint::Length(request_h),
+        ])
+        .split(area);
+
+        let top = Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(rows[0]);
+        self.render_throughput(frame, top[0], d);
+        self.render_gpus(frame, top[1], d);
+
+        if rows[1].height > 0 {
+            let summary = Layout::horizontal([
+                Constraint::Percentage(26),
+                Constraint::Percentage(44),
+                Constraint::Percentage(30),
+            ])
+            .split(rows[1]);
+            self.render_autod_status(frame, summary[0], d.autod);
+            self.render_context(frame, summary[1], d);
+            self.render_spec(frame, summary[2], d);
+        }
+
+        let main = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(rows[2]);
+        self.render_layers(frame, main[0], d);
+        let cycle_lines = if d.autod.available {
+            autonomous_cycle_lines(d.autod, main[1].width.saturating_sub(2)).len()
+        } else {
+            1
+        };
+        let operation_reserve = if rows[2].height >= 7 { 4 } else { 0 };
+        let cycle_h = cycle_panel_height(rows[2].height, cycle_lines, operation_reserve);
+        if show_experts {
+            let operation_h = rows[2].height.saturating_sub(cycle_h).min(5);
+            let rail = Layout::vertical([
+                Constraint::Length(cycle_h),
+                Constraint::Length(operation_h),
+                Constraint::Min(0),
+            ])
+            .split(main[1]);
+            self.render_autonomous_cycle(frame, rail[0], d.autod);
+            self.render_autod_operations(frame, rail[1], d.autod);
+            if rail[2].height > 0 {
+                self.render_experts(frame, rail[2], d);
+            }
+        } else {
+            let rail =
+                Layout::vertical([Constraint::Length(cycle_h), Constraint::Min(0)]).split(main[1]);
+            self.render_autonomous_cycle(frame, rail[0], d.autod);
+            self.render_autod_operations(frame, rail[1], d.autod);
+        }
+        if rows[3].height > 0 {
+            self.render_requests(frame, rows[3], d);
+        }
+    }
+
+    fn render_autod_status(&self, frame: &mut Frame, area: Rect, autod: &AutodState) {
+        let block = panel(" AUTOD ", pal::VIOLET);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        if !autod.available {
+            frame.render_widget(
+                Paragraph::new("Telemetry unavailable · press o for diagnostics")
+                    .style(Style::default().fg(pal::c(pal::MAGENTA))),
+                inner,
+            );
+            return;
+        }
+
+        let active = autod.frontier.get("active").copied().unwrap_or(0);
+        let candidate = autod.frontier.get("candidate").copied().unwrap_or(0);
+        let waiting = autod.frontier.get("waiting").copied().unwrap_or(0);
+        let state = if inner.width >= 40 {
+            autod_state_label(autod)
+        } else if inner.width >= 27 {
+            autod_compact_state_label(autod)
+        } else {
+            autod_tiny_state_label(autod)
+        };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", autod.health.to_uppercase()),
+                    Style::default()
+                        .fg(pal::c(if autod.health == "running" {
+                            pal::GREEN
+                        } else {
+                            pal::AMBER
+                        }))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(state, Style::default().fg(pal::c(pal::TEXT))),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!(" up {} ", fmt_dur(Duration::from_secs(autod.uptime_secs))),
+                    Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ),
+                Span::styled(
+                    if inner.width >= 36 {
+                        format!("active {active} · waiting {waiting} · candidate {candidate}")
+                    } else {
+                        format!("a{active} · w{waiting} · c{candidate}")
+                    },
+                    Style::default().fg(pal::c(if active > 0 {
+                        pal::CYAN
+                    } else if waiting > 0 {
+                        pal::AMBER
+                    } else {
+                        pal::TEXT_MUTED
+                    })),
+                ),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn render_autonomous_cycle(&self, frame: &mut Frame, area: Rect, autod: &AutodState) {
+        if area.height == 0 {
+            return;
+        }
+        let block = panel(" AUTONOMOUS CYCLE ", pal::VIOLET);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if !autod.available {
+            frame.render_widget(
+                Paragraph::new("Telemetry unavailable · press o for diagnostics")
+                    .style(Style::default().fg(pal::c(pal::MAGENTA))),
+                inner,
+            );
+            return;
+        }
+        let lines = autonomous_cycle_lines(autod, inner.width)
+            .into_iter()
+            .take(inner.height as usize)
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn render_autod_operations(&self, frame: &mut Frame, area: Rect, autod: &AutodState) {
+        if area.height == 0 {
+            return;
+        }
+        let block = panel(" AUTOD OPERATIONS ", pal::TEXT_DIM);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        if !autod.available {
+            frame.render_widget(
+                Paragraph::new("No operational telemetry")
+                    .style(Style::default().fg(pal::c(pal::TEXT_DIM))),
+                inner,
+            );
+            return;
+        }
+
+        let failed = autod.frontier.get("failed").copied().unwrap_or(0);
+        let outcome = &autod.recent_outcomes;
+        let mut lines = if inner.height >= 2 {
+            vec![
+                Line::raw(format!(
+                    " LAST 15M  ✓ {}  ↷ {}  × {}",
+                    outcome.succeeded, outcome.deferred, outcome.failed
+                )),
+                Line::styled(
+                    format!(" FAILURE HISTORY  {failed} retained"),
+                    Style::default().fg(pal::c(if failed > 0 {
+                        pal::MAGENTA
+                    } else {
+                        pal::TEXT_DIM
+                    })),
+                ),
+            ]
+        } else {
+            vec![Line::styled(
+                format!(
+                    " 15M ✓{} ↷{} ×{} · history {failed}",
+                    outcome.succeeded, outcome.deferred, outcome.failed
+                ),
+                Style::default().fg(pal::c(if failed > 0 {
+                    pal::MAGENTA
+                } else {
+                    pal::TEXT_DIM
+                })),
+            )]
+        };
+
+        let remaining = inner.height.saturating_sub(lines.len() as u16) as usize;
+        if remaining > 0 {
+            let activities = autod
+                .activities
+                .iter()
+                .filter(|activity| !(activity.kind == "phase" && activity.status == "entered"))
+                .take(remaining)
+                .map(activity_line)
+                .collect::<Vec<_>>();
+            if activities.is_empty() {
+                lines.push(Line::styled(
+                    " No recent activity",
+                    Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ));
+            } else {
+                lines.extend(activities);
+            }
+        }
+        lines.truncate(inner.height as usize);
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     // -----------------------------------------------------------------------
@@ -1752,6 +2210,8 @@ impl Renderer {
             ("h", "layers".into(), d.view == ViewMode::Heatmap),
             ("m", "experts".into(), d.view == ViewMode::MoE),
             ("b", "bandwidth".into(), d.view == ViewMode::Bandwidth),
+            ("o", "autod".into(), d.view == ViewMode::AutodOverview),
+            ("d", "details".into(), d.view == ViewMode::AutodDetails),
         ];
         if multi {
             items.push(("v", "compare".into(), d.view == ViewMode::Models));
@@ -1818,6 +2278,75 @@ impl Renderer {
             Paragraph::new(Line::from(spans)).style(Style::default().bg(pal::c(pal::PANEL))),
             area,
         );
+    }
+}
+
+pub(crate) fn autod_detail_scroll_max(
+    terminal_width: u16,
+    terminal_height: u16,
+    model_count: usize,
+    autod: &AutodState,
+) -> u16 {
+    let terminal_area = Rect::new(0, 0, terminal_width, terminal_height);
+    let bar_rows = if model_count > 1 {
+        model_count.min(MODEL_BAR_MAX) as u16 + 2
+    } else {
+        0
+    };
+    let bar_h = if bar_rows > 0 && terminal_area.height >= bar_rows + 14 {
+        bar_rows
+    } else {
+        0
+    };
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(bar_h),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(terminal_area);
+    let panes = autod_detail_panes(rows[2]);
+    detail_scroll_max_for_body(&autod_detail_body(autod), panes[1])
+}
+
+fn autod_detail_panes(area: Rect) -> std::rc::Rc<[Rect]> {
+    if area.width < 100 {
+        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).split(area)
+    }
+}
+
+fn autod_detail_body(autod: &AutodState) -> String {
+    if let Some(record) = &autod.detail {
+        serde_json::to_string_pretty(record).unwrap_or_else(|e| e.to_string())
+    } else {
+        autod
+            .detail_error
+            .clone()
+            .unwrap_or_else(|| "Select an activity record".into())
+    }
+}
+
+fn detail_scroll_max_for_body(body: &str, area: Rect) -> u16 {
+    let inner_width = area.width.saturating_sub(2);
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_width == 0 {
+        return 0;
+    }
+    let line_count = Paragraph::new(body)
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width);
+    line_count
+        .saturating_sub(inner_height)
+        .min(u16::MAX as usize) as u16
+}
+
+fn activity_window_start(selected: usize, total: usize, capacity: usize) -> usize {
+    if capacity == 0 || total <= capacity {
+        0
+    } else {
+        selected.saturating_sub(capacity - 1).min(total - capacity)
     }
 }
 
@@ -3354,6 +3883,326 @@ fn quant_from_path(m: &DetectedModel) -> Option<String> {
     None
 }
 
+fn short_id(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
+fn primary_cycle_lane(autod: &AutodState) -> Option<&CycleLane> {
+    autod
+        .cycle
+        .active_lanes
+        .iter()
+        .find(|lane| !lane.objective_id.is_empty())
+        .or_else(|| autod.cycle.active_lanes.first())
+}
+
+fn autod_state_label(autod: &AutodState) -> String {
+    if let Some(lane) = primary_cycle_lane(autod) {
+        format!(
+            "{} · {}",
+            lane.phase.to_uppercase(),
+            fmt_cycle_elapsed(&lane.started_at)
+        )
+    } else if let Some(last) = autod.cycle.last_completed.as_ref() {
+        format!(
+            "IDLE · last {} {} ago",
+            last.phase,
+            fmt_cycle_elapsed(&last.completed_at)
+        )
+    } else {
+        "IDLE · awaiting first cycle".into()
+    }
+}
+
+fn autod_compact_state_label(autod: &AutodState) -> String {
+    if let Some(lane) = primary_cycle_lane(autod) {
+        format!(
+            "{} · {}",
+            lane.phase.to_uppercase(),
+            fmt_cycle_elapsed(&lane.started_at)
+        )
+    } else if let Some(last) = autod.cycle.last_completed.as_ref() {
+        format!(
+            "IDLE · {} {}",
+            last.phase,
+            fmt_cycle_elapsed(&last.completed_at)
+        )
+    } else {
+        "IDLE · no cycle".into()
+    }
+}
+
+fn autod_tiny_state_label(autod: &AutodState) -> String {
+    if let Some(lane) = primary_cycle_lane(autod) {
+        lane.phase.to_uppercase()
+    } else if let Some(last) = autod.cycle.last_completed.as_ref() {
+        format!("IDLE · {}", last.phase)
+    } else {
+        "IDLE".into()
+    }
+}
+
+fn all_request_panel_height(workspace_height: u16, request_rows: usize) -> u16 {
+    if workspace_height < 12 {
+        return 0;
+    }
+    let content_rows = request_rows.clamp(1, 4) as u16;
+    (content_rows + 3).min(workspace_height.saturating_sub(8))
+}
+
+fn cycle_panel_height(available: u16, content_lines: usize, operation_reserve: u16) -> u16 {
+    let desired = content_lines as u16 + 2;
+    desired.min(available.saturating_sub(operation_reserve))
+}
+
+fn fmt_cycle_elapsed(started_at: &str) -> String {
+    let seconds = chrono::DateTime::parse_from_rfc3339(started_at)
+        .ok()
+        .map(|value| {
+            (crate::autod::unix_now() - value.timestamp_millis() as f64 / 1000.0).max(0.0) as u64
+        })
+        .unwrap_or(0);
+    fmt_dur(Duration::from_secs(seconds))
+}
+
+fn autonomous_cycle_lines(autod: &AutodState, width: u16) -> Vec<Line<'static>> {
+    const STAGES: [(&str, &str); 9] = [
+        ("observe", "Observe"),
+        ("discover", "Discover"),
+        ("evaluate", "Evaluate"),
+        ("plan", "Plan"),
+        ("admit", "Admit"),
+        ("execute", "Execute"),
+        ("verify", "Verify"),
+        ("reflect", "Reflect"),
+        ("remember", "Remember"),
+    ];
+    let primary = primary_cycle_lane(autod).map(|lane| lane.lane_id.as_str());
+    let groups: Vec<&[(&str, &str)]> = if width >= 150 {
+        vec![&STAGES]
+    } else if width >= 100 {
+        vec![&STAGES[..5], &STAGES[5..]]
+    } else {
+        vec![&STAGES[..3], &STAGES[3..6], &STAGES[6..]]
+    };
+    let mut lines = Vec::new();
+    for (row, stages) in groups.iter().enumerate() {
+        let mut spans = Vec::new();
+        for (index, (id, label)) in stages.iter().enumerate() {
+            let implemented = autod
+                .cycle
+                .implemented_stages
+                .iter()
+                .any(|stage| stage == id);
+            if index > 0 {
+                spans.push(Span::styled(
+                    if implemented { "  →  " } else { "  ┄→  " },
+                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                ));
+            }
+            let active: Vec<&CycleLane> = autod
+                .cycle
+                .active_lanes
+                .iter()
+                .filter(|lane| lane.phase == *id)
+                .collect();
+            let is_primary = active
+                .iter()
+                .any(|lane| Some(lane.lane_id.as_str()) == primary);
+            let completed = autod
+                .cycle
+                .last_completed
+                .as_ref()
+                .is_some_and(|stage| stage.phase == *id);
+            let (symbol, color, bold) = if is_primary {
+                ("◉", pal::CYAN, true)
+            } else if !active.is_empty() {
+                ("●", pal::VIOLET, true)
+            } else if completed {
+                ("✓", pal::GREEN, true)
+            } else if implemented {
+                ("○", pal::TEXT_DIM, false)
+            } else {
+                ("◌", pal::TEXT_MUTED, false)
+            };
+            let mut style = Style::default().fg(pal::c(color));
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if is_primary {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            spans.push(Span::styled(
+                if is_primary {
+                    format!(" {symbol} {label} ")
+                } else {
+                    format!("{symbol} {label}")
+                },
+                style,
+            ));
+            if active.len() > 1 {
+                spans.push(Span::styled(
+                    format!(" ×{}", active.len()),
+                    Style::default().fg(pal::c(pal::VIOLET)),
+                ));
+            }
+        }
+        if row + 1 == groups.len() {
+            spans.push(Span::styled("  ↺", Style::default().fg(pal::c(pal::TEAL))));
+        }
+        lines.push(Line::from(spans));
+    }
+    let waiting = autod.frontier.get("waiting").copied().unwrap_or(0);
+    let recovering = autod.activities.iter().any(|activity| {
+        activity.kind == "phase"
+            && activity.status == "interrupted"
+            && chrono::DateTime::parse_from_rfc3339(&activity.timestamp)
+                .ok()
+                .is_some_and(|stamp| {
+                    crate::autod::unix_now() - stamp.timestamp_millis() as f64 / 1000.0 < 900.0
+                })
+    });
+    let research = Span::styled(
+        "↳ Evaluate ⇄ Research ◌",
+        Style::default().fg(pal::c(pal::TEXT_MUTED)),
+    );
+    let wait = Span::styled(
+        format!(
+            "   Evaluate → Wait {} {waiting}",
+            if waiting > 0 { "●" } else { "○" }
+        ),
+        Style::default().fg(pal::c(if waiting > 0 {
+            pal::AMBER
+        } else {
+            pal::TEXT_DIM
+        })),
+    );
+    let repair = Span::styled(
+        "   Verify → Repair ◌",
+        Style::default().fg(pal::c(pal::TEXT_MUTED)),
+    );
+    let recovery = Span::styled(
+        format!("   Recovery {}", if recovering { "●" } else { "○" }),
+        Style::default().fg(pal::c(if recovering {
+            pal::MAGENTA
+        } else {
+            pal::TEXT_DIM
+        })),
+    );
+    if width < 100 {
+        lines.push(Line::from(vec![research, wait]));
+        lines.push(Line::from(vec![repair, recovery]));
+    } else {
+        lines.push(Line::from(vec![research, wait, repair, recovery]));
+    }
+    for (index, lane) in autod.cycle.active_lanes.iter().take(2).enumerate() {
+        let symbol = if Some(lane.lane_id.as_str()) == primary {
+            "◉"
+        } else {
+            "●"
+        };
+        let objective = if lane.objective_id.is_empty() {
+            "global".into()
+        } else {
+            short_id(&lane.objective_id)
+        };
+        let action = if lane.latest_action.is_empty() {
+            "working"
+        } else {
+            &lane.latest_action
+        };
+        lines.push(Line::styled(
+            format!(
+                "{symbol} {objective} · {} · {} · {action}",
+                lane.role,
+                fmt_cycle_elapsed(&lane.started_at)
+            ),
+            Style::default().fg(pal::c(if index == 0 { pal::CYAN } else { pal::VIOLET })),
+        ));
+    }
+    lines
+}
+
+fn truncate_chars(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    if width < 2 {
+        return "…".chars().take(width).collect();
+    }
+    let mut out: String = value.chars().take(width - 1).collect();
+    out.push('…');
+    out
+}
+
+fn objective_lines(o: &Objective) -> Vec<Line<'static>> {
+    let retry = if o.status == "waiting" && !o.eligible_at.is_empty() {
+        format!(
+            "  retry {}",
+            o.eligible_at.get(11..19).unwrap_or(&o.eligible_at)
+        )
+    } else {
+        String::new()
+    };
+    vec![
+        Line::from(vec![
+            Span::styled(
+                o.status.to_uppercase(),
+                Style::default()
+                    .fg(pal::c(status_color(&o.status)))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  p{:.1}  failures {}{retry}",
+                o.priority, o.failure_count
+            )),
+        ]),
+        Line::raw(truncate_chars(&o.description, 72)),
+        Line::styled(
+            format!(
+                "{}  {}  {}",
+                short_id(&o.id),
+                if o.role.is_empty() { "—" } else { &o.role },
+                if o.latest_action.is_empty() {
+                    "no action yet"
+                } else {
+                    &o.latest_action
+                }
+            ),
+            Style::default().fg(pal::c(pal::TEXT_DIM)),
+        ),
+    ]
+}
+
+fn activity_line(a: &crate::autod::Activity) -> Line<'static> {
+    let time = a.timestamp.get(11..19).unwrap_or(&a.timestamp);
+    Line::from(vec![
+        Span::styled(
+            format!(" {time} {:<9} ", a.kind),
+            Style::default().fg(pal::c(pal::TEXT_DIM)),
+        ),
+        Span::styled(
+            format!("{:<11}", a.status),
+            Style::default().fg(pal::c(status_color(&a.status))),
+        ),
+        Span::raw(format!(
+            " {:<10} {:>6.1}s  {}",
+            a.label,
+            a.duration_ms as f64 / 1000.0,
+            short_id(&a.objective_id)
+        )),
+    ])
+}
+
+fn status_color(status: &str) -> (u8, u8, u8) {
+    match status {
+        "running" | "active" | "completed" | "succeeded" => pal::GREEN,
+        "waiting" | "candidate" | "unknown" => pal::AMBER,
+        "failed" | "interrupted" | "quarantined" => pal::MAGENTA,
+        _ => pal::TEXT_MUTED,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3443,6 +4292,63 @@ mod tests {
         let (tw, th, tpr) = layer_tile_size(60, 10, 41);
         let tpc = 10 / th;
         assert!(tpr * tpc >= 41, "{tw}x{th} tpr {tpr}");
+    }
+
+    #[test]
+    fn autod_cycle_adapts_at_target_sizes() {
+        let mut state = AutodState::default();
+        state.cycle.implemented_stages = vec!["observe".into(), "discover".into()];
+        state.cycle.active_lanes.push(CycleLane {
+            lane_id: "global".into(),
+            phase: "discover".into(),
+            role: "scout".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        });
+        for (width, rows) in [(180, 3), (120, 4), (90, 6)] {
+            let lines = autonomous_cycle_lines(&state, width);
+            assert_eq!(lines.len(), rows);
+            assert!(lines.iter().all(|line| line.width() <= width as usize));
+        }
+        let rendered = format!("{:?}", autonomous_cycle_lines(&state, 180));
+        assert!(rendered.contains('◉'));
+        assert!(rendered.contains('◌'));
+    }
+
+    #[test]
+    fn all_dashboard_sizes_requests_to_content_and_preserves_workspace() {
+        assert_eq!(all_request_panel_height(38, 0), 4);
+        assert_eq!(all_request_panel_height(38, 2), 5);
+        assert_eq!(all_request_panel_height(38, 20), 7);
+        assert_eq!(all_request_panel_height(13, 0), 4);
+        assert_eq!(all_request_panel_height(11, 4), 0);
+
+        assert_eq!(cycle_panel_height(34, 5, 4), 7);
+        assert_eq!(cycle_panel_height(9, 5, 4), 5);
+        assert_eq!(cycle_panel_height(7, 5, 4), 3);
+    }
+
+    #[test]
+    fn detail_scroll_is_bounded_by_wrapped_content() {
+        let area = Rect::new(0, 0, 24, 6);
+        assert_eq!(detail_scroll_max_for_body("short record", area), 0);
+
+        let body = "wrapped detail ".repeat(40);
+        let max_scroll = detail_scroll_max_for_body(&body, area);
+        assert!(max_scroll > 0);
+        assert!(max_scroll < u16::MAX);
+        assert!(detail_scroll_max_for_body(&body, Rect::new(0, 0, 48, 6)) < max_scroll);
+    }
+
+    #[test]
+    fn activity_window_keeps_selection_visible() {
+        assert_eq!(activity_window_start(0, 30, 10), 0);
+        assert_eq!(activity_window_start(9, 30, 10), 0);
+        assert_eq!(activity_window_start(10, 30, 10), 1);
+        assert_eq!(activity_window_start(20, 30, 10), 11);
+        assert_eq!(activity_window_start(29, 30, 10), 20);
+        assert_eq!(activity_window_start(5, 8, 10), 0);
+        assert_eq!(activity_window_start(5, 8, 0), 0);
     }
 }
 

@@ -2,7 +2,7 @@
 """Convert a `tmux capture-pane -e -p` dump (with SGR colour codes) into a
 standalone SVG. Used to produce the screenshots in docs/.
 
-    tmux new-session -d -s shot -x 140 -y 44 "llm-visuals"
+    tmux new-session -d -s shot -x 140 -y 44 "autod-visuals"
     sleep 10; tmux capture-pane -t shot -e -p > shot.ansi; tmux kill-session -t shot
     python3 docs/tools/ansi2svg.py shot.ansi docs/dashboard.svg
 """

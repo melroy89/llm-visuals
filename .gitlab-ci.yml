@@ -1,0 +1,30 @@
+stages:
+  - check
+  - test
+
+default:
+  image: registry.melroy.org/melroy/docker-images/rust:1.98.1-node-24.20.0
+  interruptible: true
+  cache:
+    key: cargo-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cargo/
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  CARGO_TERM_COLOR: always
+
+format:
+  stage: check
+  script:
+    - cargo fmt --all -- --check
+
+check:
+  stage: check
+  script:
+    - cargo check --locked
+
+test:
+  stage: test
+  script:
+    - cargo test --locked

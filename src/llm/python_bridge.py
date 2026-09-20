@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HuggingFace Transformers attention bridge for llm-visuals.
+HuggingFace Transformers attention bridge for autod-visuals.
 
 Loads a causal LM, runs generation with output_attentions=True, and streams
 JSON lines of per-layer/per-head attention activity to stdout.

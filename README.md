@@ -1,4 +1,4 @@
-# llm-visuals
+# autod-visuals
 
 **A live terminal dashboard for the LLM running on your machine.**
 
@@ -46,13 +46,13 @@ the Linux amdgpu driver for AMD GPU panels, and a locally listening
 
 On Windows 11, see [Windows](#windows) for setup; on a Mac, see
 [macOS](#macos). Prebuilt binaries for all three, on x86-64 and ARM64, are
-attached to each [release](https://github.com/DingoOz/llm-visuals/releases) —
+attached to each [release](https://gitlab.melroy.org/melroy/autod-visuals/-/releases) —
 see [Building and cross-compiling](#building-and-cross-compiling) to make your
 own.
 
 ```sh
-git clone https://github.com/DingoOz/llm-visuals
-cd llm-visuals
+git clone git@gitlab.melroy.org:melroy/autod-visuals.git
+cd autod-visuals
 cargo run --release -- --demo      # synthetic server + two synthetic GPUs
 cargo run --release                # attach to the LLM server that is running
 ```
@@ -61,7 +61,7 @@ Or install the binary:
 
 ```sh
 cargo install --path .
-llm-visuals
+autod-visuals
 ```
 
 The dashboard auto-detects the server: it lists GPU compute processes, scans
@@ -98,8 +98,8 @@ in an issue.
 Then, in PowerShell:
 
 ```powershell
-git clone https://github.com/DingoOz/llm-visuals
-cd llm-visuals
+git clone git@gitlab.melroy.org:melroy/autod-visuals.git
+cd autod-visuals
 cargo run --release -- --demo
 cargo run --release
 ```
@@ -153,10 +153,10 @@ console, pass `--color truecolor` if colours look flat.
 - [ ] Model paths with spaces (e.g. under `C:\Users\Jane Doe\models`). The
       command line is split on whitespace, so the path and the GGUF details
       are likely to be missing.
-- [ ] With no flags, rows are written to `%LOCALAPPDATA%\llm-visuals\llm.db`;
+- [ ] With no flags, rows are written to `%LOCALAPPDATA%\autod-visuals\llm.db`;
       `--log-db llm.db` writes there instead; a path that cannot be created
       (e.g. on a missing drive) fails with a readable error.
-- [ ] `s`, change a value, `w`: `%APPDATA%\llm-visuals\settings.json` is
+- [ ] `s`, change a value, `w`: `%APPDATA%\autod-visuals\settings.json` is
       written and the value is used at the next launch.
 - [ ] `--model <hf-id>` starts the Python bridge.
 - [ ] Resizing the window and very small window sizes.
@@ -185,7 +185,7 @@ Linux.
   temperature are unavailable, and Metal/unified memory is not read.
 - **Memory pipeline (`b`)**: RAM totals and the server's resident memory come
   from the OS; the DISK and PCIe stages have no counters to read.
-- **Settings** go to `~/Library/Application Support/llm-visuals/settings.json`
+- **Settings** go to `~/Library/Application Support/autod-visuals/settings.json`
   and the log database to the same directory.
 
 ---
@@ -385,6 +385,11 @@ watched and `--pid A,B` restricts it to named processes.
 | `m` | expert map zoom, finer blocks |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
+| `o` | AUTOD overview: health, objectives, trends, GPU-aligned activity |
+| `d` | AUTOD activity list and full redacted record inspector |
+| `↑` / `↓`, `j` / `k` | select an AUTOD detail record; selecting an older row pins it while new events arrive |
+| `f` | cycle AUTOD activity filters |
+| mouse wheel, `PageUp` / `PageDown`, `Home` / `End` | scroll the AUTOD inspector |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
 | `1`–`9` | focus that model directly |
 | `t` | cycle theme: defrag, neon, fire, ocean, monochrome |
@@ -446,7 +451,7 @@ choices in every MoE layer but never exports them; the patch adds an
 
 ```sh
 cd /path/to/llama.cpp
-git apply /path/to/llm-visuals/patches/llama-server-expert-stats.patch
+git apply /path/to/autod-visuals/patches/llama-server-expert-stats.patch
 cmake --build build --target llama-server -j
 llama-server ... --metrics --expert-stats   # or env LLAMA_ARG_EXPERT_STATS=1
 ```
@@ -509,6 +514,7 @@ MTP.
 --gpu 0,1            GPU indices to show (default: all)
 --poll-ms 200        sampling interval for the server and GPU telemetry
 --api-key-file PATH  bearer token file for inference-server HTTP requests
+--autod-socket PATH  read-only AUTOD telemetry socket (default: /run/autod/telemetry.sock)
 --color auto|truecolor|256
 --theme defrag|neon|fire|ocean|monochrome
 --max-layers N, --max-heads N     caps for the attention view
@@ -517,7 +523,7 @@ MTP.
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
 ```
 
-`llm-visuals --help` lists everything.
+`autod-visuals --help` lists everything.
 
 When the inference server requires authentication, point `--api-key-file` at
 a file containing only the bearer token. The token is read at launch, is never
@@ -530,8 +536,8 @@ the account running the dashboard.
 Press `s` to change the theme, colour depth, poll interval, model limits,
 GPUs and logging while the dashboard runs. `a` applies the values to this
 session; `w` also saves them as the launch default, in
-`~/.config/llm-visuals/settings.json` (`%APPDATA%\llm-visuals` on Windows,
-`~/Library/Application Support/llm-visuals` on macOS). The file maps flag
+`~/.config/autod-visuals/settings.json` (`%APPDATA%\autod-visuals` on Windows,
+`~/Library/Application Support/autod-visuals` on macOS). The file maps flag
 names to values, e.g. `{"theme": "neon", "poll-ms": "500"}`. Saved values are
 read as if typed before your own flags, so a flag on the command line still
 wins. Only values that differ from the built-in default are kept. The GPU
@@ -542,23 +548,25 @@ in the status line.
 ### SQLite log
 
 Logging is on by default. `--log-db auto` writes to
-`~/.local/share/llm-visuals/llm.db` (`%LOCALAPPDATA%\llm-visuals` on
-Windows, `~/Library/Application Support/llm-visuals` on macOS); pass a path
+`~/.local/share/autod-visuals/llm.db` (`%LOCALAPPDATA%\autod-visuals` on
+Windows, `~/Library/Application Support/autod-visuals` on macOS); pass a path
 to use another file, or `--log-db off` to turn it off. `--demo` does not log
 unless given an explicit path, so synthetic numbers stay out of the real
 history. If the default location cannot be opened, the dashboard keeps
 running without logging; an explicit path that fails is an error.
 
-Three tables are written (timestamps are Unix seconds):
+Four tables are written (timestamps are Unix seconds):
 `model_samples` (decode/prefill tok/s, context fill, session totals per model),
 `gpu_samples` (utilisation, VRAM, power, temperature per card) and `requests`
-(one row per finished request: tokens, TTFT, duration, average rates). The file
+(one row per finished request: tokens, TTFT, duration, average rates), plus
+`autod_events` (safe summaries
+only; prompts, responses, tool arguments, and outcomes remain in AUTOD). The file
 uses WAL, so it can be queried while the dashboard runs. Once the data passes
 `--log-db-max-mb` (1 GB by default) the oldest tenth of each table is deleted;
 SQLite reuses the freed pages, so the file stops growing at about that size.
 
 ```sh
-sqlite3 ~/.local/share/llm-visuals/llm.db "SELECT model, AVG(avg_decode_tps) FROM requests GROUP BY model"
+sqlite3 ~/.local/share/autod-visuals/llm.db "SELECT model, AVG(avg_decode_tps) FROM requests GROUP BY model"
 ```
 
 ---

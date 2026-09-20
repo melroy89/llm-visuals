@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-const APP: &str = "llm-visuals";
+const APP: &str = "autod-visuals";
 
 fn env_dir(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)

@@ -1,3 +1,4 @@
+mod autod;
 mod bandwidth;
 mod colors;
 mod config;
@@ -17,9 +18,12 @@ mod settings;
 mod sglang;
 mod vllm;
 
+use autod::{AutodMonitor, AutodState, Update as AutodUpdate};
 use config::{Args, ViewMode};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -473,7 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     crossterm::terminal::enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -484,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fn drop(&mut self) {
             if !self.restored {
                 let _ = crossterm::terminal::disable_raw_mode();
-                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
             }
         }
     }
@@ -533,9 +537,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect::<Vec<u32>>(),
     );
+    let (autod_tx, mut autod_rx) = mpsc::channel::<AutodUpdate>(8);
     let gpu_filter = args.gpu_indices();
     let mut poll = Duration::from_millis(args.poll_ms.max(50));
     let mut pollers: Vec<JoinHandle<()>> = Vec::new();
+    let mut latest_autod = AutodState::new(args.autod_socket.clone());
+    if let Some(log) = db.as_ref() {
+        if let Ok(events) = log.restore_autod() {
+            latest_autod.activities = events;
+        }
+    }
+
+    if !args.demo {
+        tokio::spawn(AutodMonitor::new(args.autod_socket.clone()).run(autod_tx.clone()));
+    }
 
     if args.demo {
         let n = if gpu_filter.is_empty() {
@@ -618,7 +633,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ui_changed = false;
         if event::poll(Duration::from_millis(0))? {
             ui_changed = true;
-            if let Event::Key(key) = event::read()? {
+            let input = event::read()?;
+            if let Event::Key(key) = input {
                 if key.kind == KeyEventKind::Press && settings_form.is_some() {
                     let form = settings_form.as_mut().unwrap();
                     let mut close = false;
@@ -688,6 +704,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('m') => view_mode = ViewMode::MoE,
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
+                        KeyCode::Char('o') => view_mode = ViewMode::AutodOverview,
+                        KeyCode::Char('d') => view_mode = ViewMode::AutodDetails,
+                        KeyCode::Up | KeyCode::Char('k') if view_mode == ViewMode::AutodDetails => {
+                            latest_autod.move_selection(-1)
+                        }
+                        KeyCode::Down | KeyCode::Char('j')
+                            if view_mode == ViewMode::AutodDetails =>
+                        {
+                            latest_autod.move_selection(1)
+                        }
+                        KeyCode::Char('f') if view_mode == ViewMode::AutodDetails => {
+                            latest_autod.cycle_filter()
+                        }
+                        KeyCode::PageUp if view_mode == ViewMode::AutodDetails => {
+                            let size = terminal.size()?;
+                            let max_scroll = render::autod_detail_scroll_max(
+                                size.width,
+                                size.height,
+                                slots.len(),
+                                &latest_autod,
+                            );
+                            latest_autod.detail_scroll = latest_autod
+                                .detail_scroll
+                                .min(max_scroll)
+                                .saturating_sub(10)
+                        }
+                        KeyCode::PageDown if view_mode == ViewMode::AutodDetails => {
+                            let size = terminal.size()?;
+                            let max_scroll = render::autod_detail_scroll_max(
+                                size.width,
+                                size.height,
+                                slots.len(),
+                                &latest_autod,
+                            );
+                            latest_autod.detail_scroll = latest_autod
+                                .detail_scroll
+                                .min(max_scroll)
+                                .saturating_add(10)
+                                .min(max_scroll)
+                        }
+                        KeyCode::Home if view_mode == ViewMode::AutodDetails => {
+                            latest_autod.detail_scroll = 0
+                        }
+                        KeyCode::End if view_mode == ViewMode::AutodDetails => {
+                            let size = terminal.size()?;
+                            latest_autod.detail_scroll = render::autod_detail_scroll_max(
+                                size.width,
+                                size.height,
+                                slots.len(),
+                                &latest_autod,
+                            )
+                        }
                         KeyCode::Tab => focus = (focus + 1) % n,
                         KeyCode::BackTab => focus = (focus + n - 1) % n,
                         // Digits jump straight to a model in the strip.
@@ -705,6 +773,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             theme_name = colors::next_theme_name(&theme_name).to_string();
                             renderer.theme = colors::get_theme(&theme_name);
                             args.theme = theme_name.clone();
+                        }
+                        _ => {}
+                    }
+                }
+            } else if let Event::Mouse(mouse) = input {
+                if view_mode == ViewMode::AutodDetails {
+                    let size = terminal.size()?;
+                    let max_scroll = render::autod_detail_scroll_max(
+                        size.width,
+                        size.height,
+                        slots.len(),
+                        &latest_autod,
+                    );
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            latest_autod.detail_scroll = latest_autod
+                                .detail_scroll
+                                .min(max_scroll)
+                                .saturating_sub(10);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            latest_autod.detail_scroll = latest_autod
+                                .detail_scroll
+                                .min(max_scroll)
+                                .saturating_add(10)
+                                .min(max_scroll);
                         }
                         _ => {}
                     }
@@ -826,6 +920,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        while let Ok(update) = autod_rx.try_recv() {
+            match update {
+                AutodUpdate::Snapshot(snapshot, activities) => {
+                    latest_autod.apply(*snapshot, activities)
+                }
+                AutodUpdate::Unavailable(error) => {
+                    latest_autod.available = false;
+                    latest_autod.error = Some(error);
+                }
+                AutodUpdate::Detail { key, result } => {
+                    if latest_autod.selected_activity_key().as_ref() == Some(&key) {
+                        match *result {
+                            Ok(detail) => {
+                                latest_autod.detail = Some(detail);
+                                latest_autod.detail_error = None
+                            }
+                            Err(error) => latest_autod.detail_error = Some(error),
+                        }
+                    }
+                }
+            }
+            ui_changed = true;
+        }
+        if view_mode == ViewMode::AutodDetails
+            && latest_autod.detail.is_none()
+            && latest_autod.detail_error.is_none()
+        {
+            if let Some(item) = latest_autod.selected_activity().cloned() {
+                let tx = autod_tx.clone();
+                let socket = latest_autod.socket.clone();
+                let key = item.key();
+                latest_autod.detail_error = Some("loading…".into());
+                tokio::spawn(async move {
+                    let result = autod::fetch_detail(socket, item.kind, item.id).await;
+                    let _ = tx
+                        .send(AutodUpdate::Detail {
+                            key,
+                            result: Box::new(result),
+                        })
+                        .await;
+                });
+            }
+        }
         while let Ok((pid, s)) = live_rx.try_recv() {
             ui_changed = true;
             if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
@@ -915,7 +1052,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rows = slots
                 .iter()
                 .map(|s| (&s.model, &s.perf, s.live.ctx_used(), s.ctx_max));
-            if let Err(e) = log.tick(rows, &latest_gpu, now) {
+            if let Err(e) = log.tick(rows, &latest_gpu, Some(&latest_autod), now) {
                 // Keep the dashboard up; stop writing and say why.
                 status = format!("--log-db stopped: {e}");
                 db = None;
@@ -947,6 +1084,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             demo: args.demo,
             experts: cur.and_then(|v| v.experts),
             settings: settings_form.as_ref(),
+            autod: &latest_autod,
         };
         renderer.render_frame(&mut terminal, &dash);
 
@@ -957,7 +1095,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     crossterm::terminal::disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     _guard.restored = true;
     Ok(())
 }
@@ -1129,7 +1267,7 @@ mod tests {
     async fn discover_with_explicit_endpoint() {
         let (port, _shutdown) = spawn_mock_server(CANNED_VLLM_MODELS, CANNED_VLLM_METRICS).await;
         let ep = format!("http://127.0.0.1:{port}/v1");
-        let args = Args::try_parse_from(["llm-visuals", "--endpoint", &ep]).unwrap();
+        let args = Args::try_parse_from(["autod-visuals", "--endpoint", &ep]).unwrap();
         assert!(args.is_endpoint());
         assert_eq!(args.endpoint_url().as_deref(), Some(ep.as_str()));
 
@@ -1150,7 +1288,7 @@ mod tests {
     async fn discover_with_model_url() {
         let (port, _shutdown) = spawn_mock_server(CANNED_VLLM_MODELS, CANNED_VLLM_METRICS).await;
         let ep = format!("http://127.0.0.1:{port}/v1");
-        let args = Args::try_parse_from(["llm-visuals", "--model", &ep]).unwrap();
+        let args = Args::try_parse_from(["autod-visuals", "--model", &ep]).unwrap();
         assert!(args.is_endpoint());
         assert_eq!(args.endpoint_url().as_deref(), Some(ep.as_str()));
 
@@ -1172,7 +1310,7 @@ mod tests {
         let (port, _shutdown) = spawn_mock_server(CANNED_VLLM_MODELS, CANNED_VLLM_METRICS).await;
         let ep = format!("http://127.0.0.1:{port}/v1");
         let args =
-            Args::try_parse_from(["llm-visuals", "--endpoint", &ep, "--pid", "999999"]).unwrap();
+            Args::try_parse_from(["autod-visuals", "--endpoint", &ep, "--pid", "999999"]).unwrap();
         let (models, err) = discover(&args, &HttpAuth::default()).await;
         assert!(err.is_none());
         assert_eq!(
@@ -1187,7 +1325,7 @@ mod tests {
     async fn discover_detects_ollama_server() {
         let (port, _shutdown) = spawn_mock_server(CANNED_OLLAMA_MODELS, "").await;
         let ep = format!("http://127.0.0.1:{port}/v1");
-        let args = Args::try_parse_from(["llm-visuals", "--endpoint", &ep]).unwrap();
+        let args = Args::try_parse_from(["autod-visuals", "--endpoint", &ep]).unwrap();
         let (models, err) = discover(&args, &HttpAuth::default()).await;
         assert!(err.is_none());
         let m = models
@@ -1202,7 +1340,7 @@ mod tests {
     #[tokio::test]
     async fn discover_reports_unreachable_explicit_endpoint() {
         let args =
-            Args::try_parse_from(["llm-visuals", "--endpoint", "http://127.0.0.1:1/v1"]).unwrap();
+            Args::try_parse_from(["autod-visuals", "--endpoint", "http://127.0.0.1:1/v1"]).unwrap();
         let (models, err) = discover(&args, &HttpAuth::default()).await;
         assert!(err.is_some());
         assert!(err
@@ -1216,8 +1354,9 @@ mod tests {
 
     #[tokio::test]
     async fn discover_reports_unsupported_https_endpoint() {
-        let args = Args::try_parse_from(["llm-visuals", "--endpoint", "https://localhost:7000/v1"])
-            .unwrap();
+        let args =
+            Args::try_parse_from(["autod-visuals", "--endpoint", "https://localhost:7000/v1"])
+                .unwrap();
         let (_models, err) = discover(&args, &HttpAuth::default()).await;
         assert!(err.is_some());
         assert!(err.unwrap().contains("HTTPS is not supported"));

@@ -16,6 +16,10 @@ pub enum ViewMode {
     Bandwidth,
     /// Side-by-side comparison of every detected model.
     Models,
+    /// AUTOD health, objectives, trends, and activity.
+    AutodOverview,
+    /// Searchable AUTOD activity with record inspector.
+    AutodDetails,
 }
 
 impl std::fmt::Display for ViewMode {
@@ -27,13 +31,15 @@ impl std::fmt::Display for ViewMode {
             ViewMode::MoE => write!(f, "moe"),
             ViewMode::Bandwidth => write!(f, "bandwidth"),
             ViewMode::Models => write!(f, "models"),
+            ViewMode::AutodOverview => write!(f, "autod overview"),
+            ViewMode::AutodDetails => write!(f, "autod details"),
         }
     }
 }
 
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "llm-visuals",
+    name = "autod-visuals",
     about = "Real-time terminal dashboard for a locally running LLM",
     // Saved settings are passed ahead of the real command line, so a flag
     // given twice must take its last value rather than be an error.
@@ -136,6 +142,10 @@ pub struct Args {
     /// Size cap for --log-db in MB; the oldest rows are dropped past it (0 = no cap)
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
+
+    /// Read-only AUTOD telemetry Unix socket
+    #[arg(long, default_value = "/run/autod/telemetry.sock", value_name = "PATH")]
+    pub autod_socket: PathBuf,
 }
 
 impl Args {

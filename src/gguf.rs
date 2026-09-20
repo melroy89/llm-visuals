@@ -467,10 +467,10 @@ mod tests {
     }
 
     #[test]
-    /// Set LLM_VISUALS_TEST_GGUF to a local MoE GGUF to exercise the reader
+    /// Set AUTOD_VISUALS_TEST_GGUF to a local MoE GGUF to exercise the reader
     /// against a real file; skipped otherwise.
     fn read_local_gguf_if_configured() {
-        let Ok(p) = std::env::var("LLM_VISUALS_TEST_GGUF") else {
+        let Ok(p) = std::env::var("AUTOD_VISUALS_TEST_GGUF") else {
             return;
         };
         let path = Path::new(&p);

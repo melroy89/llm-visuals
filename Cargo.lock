@@ -74,6 +74,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "autod-visuals"
+version = "0.8.2"
+dependencies = [
+ "chrono",
+ "clap",
+ "crossterm",
+ "ratatui",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -486,21 +501,6 @@ name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
-
-[[package]]
-name = "llm-visuals"
-version = "0.8.2"
-dependencies = [
- "chrono",
- "clap",
- "crossterm",
- "ratatui",
- "rusqlite",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
-]
 
 [[package]]
 name = "lock_api"

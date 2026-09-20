@@ -631,7 +631,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
 /// This dashboard is itself a process with `--model` on its command line;
 /// without this it would list itself as a running LLM.
 fn is_self(pid: u32, cmdline: &str) -> bool {
-    pid == std::process::id() || cmdline.contains("llm-visuals")
+    pid == std::process::id() || cmdline.contains("autod-visuals")
 }
 
 #[derive(Default)]
@@ -1764,7 +1764,7 @@ mod tests {
 
     #[test]
     fn hf_config_ctx_reads_max_position_embeddings() {
-        let dir = std::env::temp_dir().join("llm-visuals-test-hfcfg");
+        let dir = std::env::temp_dir().join("autod-visuals-test-hfcfg");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("config.json"),
@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn hf_config_reads_nested_text_config_and_experts() {
-        let dir = std::env::temp_dir().join("llm-visuals-test-hfcfg-moe");
+        let dir = std::env::temp_dir().join("autod-visuals-test-hfcfg-moe");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("config.json"),

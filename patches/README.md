@@ -23,7 +23,7 @@ verified by loading a Qwen3.6-35B-A3B GGUF (256 experts, 8 active).
 
 ```sh
 cd /path/to/llama.cpp
-git apply /path/to/llm-visuals/patches/llama-server-expert-stats.patch
+git apply /path/to/autod-visuals/patches/llama-server-expert-stats.patch
 cmake --build build --target llama-server -j
 ```
 

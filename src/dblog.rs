@@ -1,6 +1,7 @@
 //! `--log-db`: append samples and finished requests to a SQLite file so a
 //! session can be queried after the dashboard is closed.
 
+use crate::autod::{Activity, AutodState};
 use crate::gpu::GpuStats;
 use crate::model_detect::DetectedModel;
 use crate::perf::PerfTracker;
@@ -24,6 +25,11 @@ CREATE TABLE IF NOT EXISTS requests (
     prompt_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, decoded INTEGER NOT NULL,
     ttft_s REAL, duration_s REAL NOT NULL,
     avg_prefill_tps REAL NOT NULL, avg_decode_tps REAL NOT NULL, peak_decode_tps REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS autod_events (
+    kind TEXT NOT NULL, id TEXT NOT NULL, ts TEXT NOT NULL, objective_id TEXT NOT NULL,
+    label TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER NOT NULL,
+    PRIMARY KEY(kind,id));
+CREATE INDEX IF NOT EXISTS autod_events_ts ON autod_events(ts DESC);
 ";
 
 /// One row per model and per GPU each `every`; one row per finished request.
@@ -37,7 +43,7 @@ pub struct DbLog {
     max_bytes: u64,
 }
 
-const TABLES: [&str; 3] = ["model_samples", "gpu_samples", "requests"];
+const TABLES: [&str; 4] = ["model_samples", "gpu_samples", "requests", "autod_events"];
 
 fn unix_now() -> f64 {
     SystemTime::now()
@@ -105,6 +111,7 @@ impl DbLog {
         &mut self,
         models: impl Iterator<Item = (&'a DetectedModel, &'a PerfTracker, usize, usize)>,
         gpus: &[GpuStats],
+        autod: Option<&AutodState>,
         now: Instant,
     ) -> rusqlite::Result<()> {
         if self.last.is_some_and(|t| now - t < self.every) {
@@ -174,8 +181,44 @@ impl DbLog {
                 ],
             )?;
         }
+        if let Some(autod) = autod {
+            for event in &autod.activities {
+                tx.execute(
+                    "INSERT OR IGNORE INTO autod_events VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        event.kind,
+                        event.id,
+                        event.timestamp,
+                        event.objective_id,
+                        event.label,
+                        event.status,
+                        event.duration_ms as i64
+                    ],
+                )?;
+            }
+        }
         tx.commit()?;
         self.trim()
+    }
+
+    pub fn restore_autod(&self) -> rusqlite::Result<Vec<Activity>> {
+        let mut events = Vec::new();
+        let mut stmt=self.conn.prepare("SELECT kind,id,ts,objective_id,label,status,duration_ms FROM autod_events ORDER BY ts DESC LIMIT 200")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Activity {
+                kind: r.get(0)?,
+                id: r.get(1)?,
+                timestamp: r.get(2)?,
+                objective_id: r.get(3)?,
+                label: r.get(4)?,
+                status: r.get(5)?,
+                duration_ms: r.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        for row in rows {
+            events.push(row?)
+        }
+        Ok(events)
     }
 }
 
@@ -187,7 +230,7 @@ mod tests {
 
     #[test]
     fn logs_samples_and_each_finished_request_once() {
-        let path = std::env::temp_dir().join(format!("llm-visuals-dblog-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("autod-visuals-dblog-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut log = DbLog::open(&path, Duration::ZERO, 0).unwrap();
         let model = crate::demo::demo_models(8192, 1).remove(0);
@@ -210,8 +253,13 @@ mod tests {
         let gpus = [crate::gpu::DemoGpu::new(0).step(0.5)];
         let now = t0 + Duration::from_millis(700);
         for _ in 0..2 {
-            log.tick(std::iter::once((&model, &perf, 110, 8192)), &gpus, now)
-                .unwrap();
+            log.tick(
+                std::iter::once((&model, &perf, 110, 8192)),
+                &gpus,
+                None,
+                now,
+            )
+            .unwrap();
         }
         let count = |t: &str| -> i64 {
             log.conn
@@ -231,7 +279,7 @@ mod tests {
 
     #[test]
     fn trims_oldest_rows_to_stay_under_the_cap() {
-        let path = std::env::temp_dir().join(format!("llm-visuals-dbcap-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("autod-visuals-dbcap-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let cap = 64 * 1024;
         let mut log = DbLog::open(&path, Duration::ZERO, cap).unwrap();
@@ -240,7 +288,7 @@ mod tests {
         let gpus = [crate::gpu::DemoGpu::new(0).step(0.5)];
         let now = Instant::now();
         for _ in 0..3000 {
-            log.tick(std::iter::once((&model, &perf, 0, 8192)), &gpus, now)
+            log.tick(std::iter::once((&model, &perf, 0, 8192)), &gpus, None, now)
                 .unwrap();
         }
         assert!(log.used_bytes().unwrap() <= cap);

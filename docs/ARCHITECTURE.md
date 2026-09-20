@@ -1,6 +1,6 @@
 # Architecture
 
-llm-visuals is a single Rust binary built on [ratatui](https://ratatui.rs) and
+autod-visuals is a single Rust binary built on [ratatui](https://ratatui.rs) and
 tokio. It has no agents inside the inference server: everything it shows is
 polled over HTTP or read from `nvidia-smi`, then derived and smoothed locally.
 

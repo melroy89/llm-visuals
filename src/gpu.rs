@@ -561,8 +561,10 @@ mod tests {
 
     #[test]
     fn parse_amd_clocks_and_pcie_generation() {
-        let dir =
-            std::env::temp_dir().join(format!("llm-visuals-amd-clock-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "autod-visuals-amd-clock-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let clocks = dir.join("pp_dpm_sclk");
         std::fs::write(&clocks, "S: 26Mhz *\n1: 500Mhz\n2: 2526Mhz\n").unwrap();
@@ -574,8 +576,10 @@ mod tests {
 
     #[test]
     fn amd_sysfs_values_fill_gpu_stats() {
-        let dir =
-            std::env::temp_dir().join(format!("llm-visuals-amd-stats-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "autod-visuals-amd-stats-test-{}",
+            std::process::id()
+        ));
         let hwmon = dir.join("hwmon/hwmon0");
         std::fs::create_dir_all(&hwmon).unwrap();
         let write = |name: &str, value: &str| std::fs::write(dir.join(name), value).unwrap();
