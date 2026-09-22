@@ -10,6 +10,27 @@ readme = "README.md"
 keywords = ["llm", "tui", "llama-cpp", "gpu", "monitoring"]
 categories = ["command-line-utilities", "visualization"]
 
+[package.metadata.deb]
+maintainer = "Melroy van den Berg <melroy@melroy.org>"
+copyright = "2026, Melroy van den Berg"
+license-file = ["LICENSE"]
+section = "utils"
+priority = "optional"
+depends = "$auto"
+extended-description = """\
+autod-visuals is a live terminal dashboard for the LLM running on your
+machine, part of the autod tooling. It detects the inference servers you
+already have up (llama.cpp llama-server, ollama, vLLM, SGLang), reads their
+counters and NVIDIA or AMD GPU telemetry, and turns them into a truecolor
+picture of what the model is doing right now: tokens per second, time to first
+token, GPU load and memory, context fill rate, speculative-decoding acceptance,
+which layers are busy on which GPU, and with a small server patch exactly which
+experts a mixture-of-experts model routed the last token through. Every number
+on screen comes from the server, the driver, or arithmetic on those; the one
+thing that can be a visual stand-in (expert identities without the patch) is
+labelled as such on screen.
+"""
+
 [dependencies]
 ratatui = { version = "0.29", features = ["crossterm", "unstable-rendered-line-info"] }
 crossterm = "0.28"
