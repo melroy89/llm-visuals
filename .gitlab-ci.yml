@@ -1,6 +1,7 @@
 stages:
   - check
   - test
+  - build
 
 default:
   image: registry.melroy.org/melroy/docker-images/rust:1.98.1-node-24.20.0
@@ -28,3 +29,22 @@ test:
   stage: test
   script:
     - cargo test --locked
+
+build:
+  stage: build
+  artifacts:
+    name: autod-visuals-${CI_COMMIT_REF_SLUG}
+    paths:
+      - target/release/autod-visuals
+  script:
+    - cargo build --release --locked
+
+build-deb:
+  stage: build
+  artifacts:
+    name: autod-visuals-${CI_COMMIT_REF_SLUG}-deb
+    paths:
+      - target/debian/*.deb
+  script:
+    - cargo install cargo-deb --locked
+    - cargo deb --release --locked
