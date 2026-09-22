@@ -47,4 +47,4 @@ build-deb:
       - target/debian/*.deb
   script:
     - cargo install cargo-deb --locked
-    - cargo deb --release --locked
+    - cargo deb -- --release --locked
